@@ -7,8 +7,10 @@
 #include <QAction>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QMessageBox>
+#include <QStyle>
 
 namespace {
 
@@ -30,6 +32,9 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
 
     m_player = new PlayerController(this);
+    m_normalCentralMargins = ui->verticalLayout->contentsMargins();
+    m_normalCentralSpacing = ui->verticalLayout->spacing();
+    m_normalVideoMargins = ui->videoLayout->contentsMargins();
 
     setWindowTitle("QT FFmpeg Player");
     ui->speedComboBox->setCurrentText("1.0x");
@@ -56,8 +61,23 @@ MainWindow::MainWindow(QWidget *parent)
     addAction(openAction);
     connect(openAction, &QAction::triggered, this, &MainWindow::onOpenFileTriggered);
 
+    auto *fullscreenAction = new QAction(this);
+    fullscreenAction->setShortcut(QKeySequence(Qt::Key_F11));
+    addAction(fullscreenAction);
+    connect(fullscreenAction, &QAction::triggered, this, &MainWindow::toggleFullscreen);
+
+    auto *exitFullscreenAction = new QAction(this);
+    exitFullscreenAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    addAction(exitFullscreenAction);
+    connect(exitFullscreenAction, &QAction::triggered, this, [this]() {
+        if (m_isFullscreen) {
+            setFullscreenEnabled(false);
+        }
+    });
+
     connect(ui->openFileButton, &QPushButton::clicked, this, &MainWindow::onOpenFileTriggered);
     connect(ui->playPauseButton, &QPushButton::clicked, this, &MainWindow::onPlayPauseClicked);
+    connect(ui->fullscreenButton, &QPushButton::clicked, this, &MainWindow::toggleFullscreen);
     connect(ui->speedComboBox, &QComboBox::currentTextChanged, this, &MainWindow::onSpeedChanged);
     connect(ui->volumeSlider, &QSlider::valueChanged, this, &MainWindow::onVolumeChanged);
 
@@ -80,6 +100,11 @@ MainWindow::MainWindow(QWidget *parent)
         "        stop:0 #0f1318, stop:0.5 #141b23, stop:1 #0a0e13);"
         "    border: 1px solid #243240;"
         "    border-radius: 26px;"
+        "}"
+        "QFrame#videoContainer[fullscreen=\"true\"] {"
+        "    background: #000000;"
+        "    border: none;"
+        "    border-radius: 0px;"
         "}"
         "QFrame#controlsPanel {"
         "    background: rgba(12, 18, 24, 0.9);"
@@ -110,6 +135,19 @@ MainWindow::MainWindow(QWidget *parent)
         "    background: #223142;"
         "}"
         "QPushButton#openFileButton:pressed {"
+        "    background: #15202c;"
+        "}"
+        "QPushButton#fullscreenButton {"
+        "    background: #1b2530;"
+        "    color: #f4f4ef;"
+        "    border: 1px solid #304252;"
+        "    border-radius: 14px;"
+        "    padding: 7px 16px;"
+        "}"
+        "QPushButton#fullscreenButton:hover {"
+        "    background: #223142;"
+        "}"
+        "QPushButton#fullscreenButton:pressed {"
         "    background: #15202c;"
         "}"
         "QSlider::groove:horizontal {"
@@ -158,6 +196,17 @@ MainWindow::~MainWindow()
         m_player->stop();
     }
     delete ui;
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event)
+{
+    if (event && event->key() == Qt::Key_Escape && m_isFullscreen) {
+        setFullscreenEnabled(false);
+        event->accept();
+        return;
+    }
+
+    QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::onPlayPauseClicked()
@@ -254,6 +303,47 @@ void MainWindow::onStopped()
         return;
     }
     ui->playPauseButton->setText("Play");
+}
+
+void MainWindow::toggleFullscreen()
+{
+    setFullscreenEnabled(!m_isFullscreen);
+}
+
+void MainWindow::setFullscreenEnabled(bool enabled)
+{
+    if (m_isFullscreen == enabled) {
+        return;
+    }
+
+    m_isFullscreen = enabled;
+
+    if (enabled) {
+        m_restoreMaximizedAfterFullscreen = isMaximized();
+        ui->controlsPanel->hide();
+        ui->verticalLayout->setContentsMargins(0, 0, 0, 0);
+        ui->verticalLayout->setSpacing(0);
+        ui->videoLayout->setContentsMargins(0, 0, 0, 0);
+        ui->videoContainer->setProperty("fullscreen", true);
+        ui->videoContainer->style()->unpolish(ui->videoContainer);
+        ui->videoContainer->style()->polish(ui->videoContainer);
+        showFullScreen();
+        return;
+    }
+
+    if (m_restoreMaximizedAfterFullscreen) {
+        showMaximized();
+    } else {
+        showNormal();
+    }
+    ui->controlsPanel->show();
+    ui->verticalLayout->setContentsMargins(m_normalCentralMargins);
+    ui->verticalLayout->setSpacing(m_normalCentralSpacing);
+    ui->videoLayout->setContentsMargins(m_normalVideoMargins);
+    ui->videoContainer->setProperty("fullscreen", false);
+    ui->videoContainer->style()->unpolish(ui->videoContainer);
+    ui->videoContainer->style()->polish(ui->videoContainer);
+    m_restoreMaximizedAfterFullscreen = false;
 }
 
 QString MainWindow::formatTimestamp(double seconds)
