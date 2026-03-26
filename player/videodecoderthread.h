@@ -1,38 +1,37 @@
-#ifndef VIDEODECODETHREAD_H
-#define VIDEODECODETHREAD_H
+#ifndef VIDEODECODERTHREAD_H
+#define VIDEODECODERTHREAD_H
 
 #include <QImage>
 #include <QMutex>
-#include <QString>
 #include <QThread>
 #include <QWaitCondition>
 
 #include <atomic>
 
-struct AVCodecContext;
-struct AVFormatContext;
-struct AVStream;
+#include "videostreaminfo.h"
+
 struct SwsContext;
 
-class VideoDecodeThread : public QThread
+class PacketQueue;
+
+class VideoDecoderThread : public QThread
 {
     Q_OBJECT
 
 public:
-    explicit VideoDecodeThread(QObject *parent = nullptr);
-    ~VideoDecodeThread() override;
+    explicit VideoDecoderThread(QObject *parent = nullptr);
+    ~VideoDecoderThread() override;
 
-    void setFilePath(const QString &filePath);
+    void setPacketQueue(PacketQueue *packetQueue);
+    void setStreamInfo(const VideoStreamInfo &streamInfo);
     void setSpeed(double speed);
     void setPaused(bool paused);
     void requestStop();
 
 signals:
-    void opened(double durationSeconds, int width, int height, double fps);
     void frameReady(const QImage &image, double ptsSeconds);
     void playbackTimeChanged(double ptsSeconds);
     void finishedWithError(const QString &message);
-    void stopped();
 
 protected:
     void run() override;
@@ -41,7 +40,8 @@ private:
     bool shouldStop() const;
     void waitWhilePaused();
 
-    QString m_filePath;
+    PacketQueue *m_packetQueue = nullptr;
+    VideoStreamInfo m_streamInfo;
 
     mutable QMutex m_stateMutex;
     QWaitCondition m_stateChanged;
@@ -51,4 +51,4 @@ private:
     double m_speed = 1.0;
 };
 
-#endif // VIDEODECODETHREAD_H
+#endif // VIDEODECODERTHREAD_H

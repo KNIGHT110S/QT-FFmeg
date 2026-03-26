@@ -5,7 +5,9 @@
 #include <QObject>
 #include <QString>
 
-class VideoDecodeThread;
+class DemuxThread;
+class PacketQueue;
+class VideoDecoderThread;
 
 class PlayerController : public QObject
 {
@@ -32,11 +34,19 @@ signals:
     void stopped();
 
 private:
-    void teardownThread();
+    void handlePipelineError(const QString &message);
+    void notifyStoppedIfIdle();
+    void teardownPipeline();
 
     QString m_filePath;
-    VideoDecodeThread *m_thread = nullptr;
+    DemuxThread *m_demuxThread = nullptr;
+    VideoDecoderThread *m_decodeThread = nullptr;
+    PacketQueue *m_packetQueue = nullptr;
     bool m_playing = false;
+    bool m_stopNotified = true;
+    bool m_errorNotified = false;
+    bool m_decoderLaunchAttempted = false;
+    double m_speed = 1.0;
 };
 
 #endif // PLAYERCONTROLLER_H

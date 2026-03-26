@@ -69,10 +69,16 @@ set(PROJECT_SOURCES
         mainwindow.ui
         player/playercontroller.cpp
         player/playercontroller.h
-        player/videodecodethread.cpp
-        player/videodecodethread.h
+        player/demuxthread.cpp
+        player/demuxthread.h
+        player/packetqueue.cpp
+        player/packetqueue.h
+        player/videodecoderthread.cpp
+        player/videodecoderthread.h
         player/videorenderwidget.cpp
         player/videorenderwidget.h
+        player/videostreaminfo.cpp
+        player/videostreaminfo.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

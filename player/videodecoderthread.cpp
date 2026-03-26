@@ -1,11 +1,11 @@
-#include "videodecodethread.h"
+#include "videodecoderthread.h"
+
+#include "packetqueue.h"
 
 #include <QElapsedTimer>
-#include <QImage>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
@@ -21,40 +21,30 @@ static QString ffmpegErrToString(int err)
     return QString::fromLatin1(buf);
 }
 
-static double safeFps(const AVStream *stream)
-{
-    if (!stream) {
-        return 0.0;
-    }
-    if (stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0) {
-        return av_q2d(stream->avg_frame_rate);
-    }
-    if (stream->r_frame_rate.num > 0 && stream->r_frame_rate.den > 0) {
-        return av_q2d(stream->r_frame_rate);
-    }
-    return 0.0;
-}
-
 } // namespace
 
-VideoDecodeThread::VideoDecodeThread(QObject *parent)
+VideoDecoderThread::VideoDecoderThread(QObject *parent)
     : QThread(parent)
 {
 }
 
-VideoDecodeThread::~VideoDecodeThread()
+VideoDecoderThread::~VideoDecoderThread()
 {
     requestStop();
     wait(2000);
 }
 
-void VideoDecodeThread::setFilePath(const QString &filePath)
+void VideoDecoderThread::setPacketQueue(PacketQueue *packetQueue)
 {
-    QMutexLocker locker(&m_stateMutex);
-    m_filePath = filePath;
+    m_packetQueue = packetQueue;
 }
 
-void VideoDecodeThread::setSpeed(double speed)
+void VideoDecoderThread::setStreamInfo(const VideoStreamInfo &streamInfo)
+{
+    m_streamInfo = streamInfo;
+}
+
+void VideoDecoderThread::setSpeed(double speed)
 {
     if (speed <= 0.0) {
         speed = 1.0;
@@ -67,7 +57,7 @@ void VideoDecodeThread::setSpeed(double speed)
     m_stateChanged.wakeAll();
 }
 
-void VideoDecodeThread::setPaused(bool paused)
+void VideoDecoderThread::setPaused(bool paused)
 {
     {
         QMutexLocker locker(&m_stateMutex);
@@ -76,19 +66,22 @@ void VideoDecodeThread::setPaused(bool paused)
     m_stateChanged.wakeAll();
 }
 
-void VideoDecodeThread::requestStop()
+void VideoDecoderThread::requestStop()
 {
     m_stopRequested.store(true, std::memory_order_relaxed);
     requestInterruption();
     m_stateChanged.wakeAll();
+    if (m_packetQueue) {
+        m_packetQueue->abort();
+    }
 }
 
-bool VideoDecodeThread::shouldStop() const
+bool VideoDecoderThread::shouldStop() const
 {
     return isInterruptionRequested() || m_stopRequested.load(std::memory_order_relaxed);
 }
 
-void VideoDecodeThread::waitWhilePaused()
+void VideoDecoderThread::waitWhilePaused()
 {
     QMutexLocker locker(&m_stateMutex);
     while (!shouldStop() && m_paused) {
@@ -96,74 +89,40 @@ void VideoDecodeThread::waitWhilePaused()
     }
 }
 
-void VideoDecodeThread::run()
+void VideoDecoderThread::run()
 {
-    QString filePathCopy;
-    {
-        QMutexLocker locker(&m_stateMutex);
-        filePathCopy = m_filePath;
-    }
-
-    if (filePathCopy.isEmpty()) {
-        emit finishedWithError("No file selected.");
-        emit stopped();
+    if (!m_packetQueue) {
+        emit finishedWithError("Packet queue was not initialized.");
         return;
     }
 
-    AVFormatContext *formatCtx = nullptr;
-    AVCodecContext *codecCtx = nullptr;
-    SwsContext *swsCtx = nullptr;
-    AVPacket *packet = nullptr;
-    AVFrame *frame = nullptr;
-
-    const QByteArray encoded = filePathCopy.toUtf8();
-    int err = avformat_open_input(&formatCtx, encoded.constData(), nullptr, nullptr);
-    if (err < 0) {
-        emit finishedWithError(QString("avformat_open_input failed: %1").arg(ffmpegErrToString(err)));
-        emit stopped();
+    const VideoStreamInfo streamInfo = m_streamInfo;
+    if (!streamInfo.isValid()) {
+        emit finishedWithError("Video stream parameters are invalid.");
         return;
     }
 
-    err = avformat_find_stream_info(formatCtx, nullptr);
-    if (err < 0) {
-        emit finishedWithError(QString("avformat_find_stream_info failed: %1").arg(ffmpegErrToString(err)));
-        avformat_close_input(&formatCtx);
-        emit stopped();
-        return;
-    }
-
-    const int videoStreamIndex = av_find_best_stream(formatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (videoStreamIndex < 0) {
-        emit finishedWithError("No video stream found.");
-        avformat_close_input(&formatCtx);
-        emit stopped();
-        return;
-    }
-
-    AVStream *videoStream = formatCtx->streams[videoStreamIndex];
-    const AVCodecParameters *params = videoStream->codecpar;
+    const AVCodecParameters *params = streamInfo.codecParameters();
     const AVCodec *decoder = avcodec_find_decoder(params->codec_id);
     if (!decoder) {
         emit finishedWithError("No suitable video decoder found.");
-        avformat_close_input(&formatCtx);
-        emit stopped();
         return;
     }
 
-    codecCtx = avcodec_alloc_context3(decoder);
+    AVCodecContext *codecCtx = avcodec_alloc_context3(decoder);
+    AVPacket *packet = nullptr;
+    AVFrame *frame = nullptr;
+    SwsContext *swsCtx = nullptr;
+
     if (!codecCtx) {
         emit finishedWithError("avcodec_alloc_context3 failed.");
-        avformat_close_input(&formatCtx);
-        emit stopped();
         return;
     }
 
-    err = avcodec_parameters_to_context(codecCtx, params);
+    int err = avcodec_parameters_to_context(codecCtx, params);
     if (err < 0) {
         emit finishedWithError(QString("avcodec_parameters_to_context failed: %1").arg(ffmpegErrToString(err)));
         avcodec_free_context(&codecCtx);
-        avformat_close_input(&formatCtx);
-        emit stopped();
         return;
     }
 
@@ -171,20 +130,8 @@ void VideoDecodeThread::run()
     if (err < 0) {
         emit finishedWithError(QString("avcodec_open2 failed: %1").arg(ffmpegErrToString(err)));
         avcodec_free_context(&codecCtx);
-        avformat_close_input(&formatCtx);
-        emit stopped();
         return;
     }
-
-    const double fps = safeFps(videoStream);
-    double durationSeconds = 0.0;
-    if (formatCtx->duration > 0) {
-        durationSeconds = formatCtx->duration / static_cast<double>(AV_TIME_BASE);
-    } else if (videoStream->duration > 0 && videoStream->time_base.den > 0) {
-        durationSeconds = videoStream->duration * av_q2d(videoStream->time_base);
-    }
-
-    emit opened(durationSeconds, codecCtx->width, codecCtx->height, fps);
 
     packet = av_packet_alloc();
     frame = av_frame_alloc();
@@ -193,8 +140,6 @@ void VideoDecodeThread::run()
         av_packet_free(&packet);
         av_frame_free(&frame);
         avcodec_free_context(&codecCtx);
-        avformat_close_input(&formatCtx);
-        emit stopped();
         return;
     }
 
@@ -204,7 +149,7 @@ void VideoDecodeThread::run()
     wallClock.invalidate();
 
     qint64 frameIndex = 0;
-    const double fallbackFps = (fps > 1e-6) ? fps : 25.0;
+    const double fallbackFps = streamInfo.fps > 1e-6 ? streamInfo.fps : 25.0;
     int swsSourceWidth = 0;
     int swsSourceHeight = 0;
     AVPixelFormat swsSourceFormat = AV_PIX_FMT_NONE;
@@ -232,8 +177,8 @@ void VideoDecodeThread::run()
             }
 
             double ptsSeconds = 0.0;
-            if (ts != AV_NOPTS_VALUE && videoStream->time_base.den > 0) {
-                ptsSeconds = ts * av_q2d(videoStream->time_base);
+            if (ts != AV_NOPTS_VALUE && streamInfo.timeBase.den > 0) {
+                ptsSeconds = ts * av_q2d(streamInfo.timeBase);
             } else {
                 ptsSeconds = frameIndex / fallbackFps;
             }
@@ -334,47 +279,40 @@ void VideoDecodeThread::run()
         }
     };
 
+    bool fatalError = false;
     while (!shouldStop()) {
         waitWhilePaused();
         if (shouldStop()) {
             break;
         }
 
-        err = av_read_frame(formatCtx, packet);
-        if (err < 0) {
-            bool fatalError = false;
-            avcodec_send_packet(codecCtx, nullptr);
-            processAvailableFrames(&fatalError);
+        if (!m_packetQueue->pop(packet)) {
             break;
-        }
-
-        if (packet->stream_index != videoStreamIndex) {
-            av_packet_unref(packet);
-            continue;
         }
 
         err = avcodec_send_packet(codecCtx, packet);
         av_packet_unref(packet);
         if (err < 0) {
             emit finishedWithError(QString("avcodec_send_packet failed: %1").arg(ffmpegErrToString(err)));
+            fatalError = true;
             break;
         }
 
-        bool fatalError = false;
         processAvailableFrames(&fatalError);
         if (fatalError) {
             break;
         }
     }
 
+    if (!shouldStop() && !fatalError) {
+        avcodec_send_packet(codecCtx, nullptr);
+        processAvailableFrames(&fatalError);
+    }
+
     if (swsCtx) {
         sws_freeContext(swsCtx);
-        swsCtx = nullptr;
     }
     av_packet_free(&packet);
     av_frame_free(&frame);
     avcodec_free_context(&codecCtx);
-    avformat_close_input(&formatCtx);
-
-    emit stopped();
 }
