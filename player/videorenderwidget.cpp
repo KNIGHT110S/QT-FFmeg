@@ -33,7 +33,7 @@ void VideoRenderWidget::paintEvent(QPaintEvent *event)
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.fillRect(rect(), QColor(0, 0, 0, 0));
+    painter.fillRect(rect(), QColor(10, 14, 19));
 
     QImage frameCopy;
     {
@@ -51,4 +51,3 @@ void VideoRenderWidget::paintEvent(QPaintEvent *event)
     const QRect targetRect(QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2), targetSize);
     painter.drawImage(targetRect, frameCopy);
 }
-
